@@ -83,10 +83,7 @@ This design enables effective open-vocabulary 3D semantic and instance segmentat
 
 ```bash
 # Train Mosaic3D model with default configuration
-python src/train.py experiment=train_spunet_scannet trainer.ddp trainer.devices=8 logger=wandb
-
-# Evaluate trained model
-python src/eval.py ckpt_path=/path/to/checkpoint.ckpt data=scannet
+python src/train.py experiment=train_spunet_multidata_ppt data=sc trainer.ddp trainer.devices=8 logger=wandb
 ```
 
 ### Mask Decoder Training
@@ -104,15 +101,117 @@ python src/train.py experiment=train_opensegment3d_scannet model.net.backbone_ck
 You can override any configuration parameter from the command line:
 
 ```bash
-python src/train.py experiment=train_spunet_scannet data=sc model=spunet34c trainer.max_epochs=100
+python src/train.py experiment=train_spunet_multidata_ppt data=sc+ar model=spunet34c trainer.max_epochs=100
 ```
 
 ## Evaluation
 
 The model achieves state-of-the-art results on multiple benchmarks:
 
-- **Annotation-free 3D semantic segmentation**: ScanNet, Matterport3D, ScanNet++
+- **Annotation-free 3D semantic segmentation**: ScanNet20 & ScanNet200, Matterport3D, ScanNet++
 - **Annotation-free 3D instance segmentation**: ScanNet200
+
+### Annotation-free 3D semantic segmentation on ScanNet20 & ScanNet200.
+
+Run the following commands to evaluate the pretrained models on ScanNet20 and ScanNet200 validation.
+
+```bash
+python src/eval.py experiment=train_spunet_multidata_ppt data=sc ckpt_path=[path/to/model/checkpoint]
+```
+
+## Model Zoo
+
+We provide pretrained models for both **model_scale** and **data_scale** experiments. All models are available on [Hugging Face](https://huggingface.co/junhalee/Mosaic3D/tree/main).
+
+### Available Models
+
+#### Data-Scale Experiments
+Models trained on different combinations of datasets:
+
+| Model | Training Data | Size | f-mIoU on ScanNet200 |
+|-------|--------------|------|-------------|
+| `sc.ckpt` | ScanNet | 2.74 GB | 13.0% |
+| `sc+ar.ckpt` | ScanNet + ARKitScenes | 2.74 GB | 14.8% |
+| `sc+ar+sc++.ckpt` | ScanNet + ARKitScenes + ScanNet++ | 2.74 GB | 15.5% |
+| `sc+ar+sc+++ma.ckpt` | SC + AR + SC++ + Matterport3D | 2.74 GB | 15.4% |
+| `sc+ar+sc+++ma+st.ckpt` | SC + AR + SC++ + MA + Structured3D | 2.74 GB | 15.7% |
+
+
+Evaluate the impact of training data scale by testing models trained on different dataset combinations. 
+Set the `data` configuration to match the training data of your checkpoint:
+
+```bash
+# Model trained on ScanNet only
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc \
+  ckpt_path=ckpt_raw/converted/sc.ckpt
+
+# Model trained on ScanNet + ARKitScenes
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc+ar \
+  ckpt_path=ckpt_raw/converted/sc+ar.ckpt
+
+# Model trained on ScanNet + ARKitScenes + ScanNet++
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc+ar+sc++ \
+  ckpt_path=ckpt_raw/converted/sc+ar+sc++.ckpt
+
+# Model trained on four datasets (+ Matterport3D)
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc+ar+sc+++ma \
+  ckpt_path=ckpt_raw/converted/sc+ar+sc+++ma.ckpt
+
+# Model trained on all five datasets (+ Structured3D)
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc+ar+sc+++ma+st \
+  ckpt_path=ckpt_raw/converted/sc+ar+sc+++ma+st.ckpt
+```
+
+#### Model-Scale Experiments 
+Models with different backbone architectures (trained on ScanNet + ARKitScenes + ScanNet++):
+
+| Model | Architecture | Parameters | Size | f-mIoU on ScanNet200 |
+|-------|--------------|------------|------|-------------|
+| `spunet14a.ckpt` | SparseUNet-14A | ~14M | 2.61 GB | 13.2% |
+| `spunet18a.ckpt` | SparseUNet-18A | ~18M | 2.64 GB | 14.5% |
+| `spunet34c.ckpt` | SparseUNet-34C | ~34M | 2.74 GB | 15.5% |
+| `spunet50.ckpt` | SparseUNet-50 | ~50M | 2.97 GB | 15.8% |
+| `spunet101.ckpt` | SparseUNet-101 | ~101M | 3.59 GB | 16.0% |
+
+Evaluate different model architectures on the combined dataset (ScanNet + ARKitScenes + ScanNet++):
+
+```bash
+# SparseUNet-14A (smallest, fastest)
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc+ar+sc++ \
+  model=spunet14a+ppt \
+  ckpt_path=ckpt_raw/converted/spunet14a.ckpt
+
+# SparseUNet-18A
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc+ar+sc++ \
+  model=spunet18a+ppt \
+  ckpt_path=ckpt_raw/converted/spunet18a.ckpt
+
+# SparseUNet-34C (recommended for balance)
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc+ar+sc++ \
+  model=spunet34c+ppt \
+  ckpt_path=ckpt_raw/converted/spunet34c.ckpt
+
+# SparseUNet-50
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc+ar+sc++ \
+  model=spunet50+ppt \
+  ckpt_path=ckpt_raw/converted/spunet50.ckpt
+
+# SparseUNet-101 (largest, best performance)
+python src/eval.py experiment=train_spunet_multidata_ppt \
+  data=sc+ar+sc++ \
+  model=spunet101+ppt \
+  ckpt_path=ckpt_raw/converted/spunet101.ckpt
+```
+
 
 ## Citation
 
