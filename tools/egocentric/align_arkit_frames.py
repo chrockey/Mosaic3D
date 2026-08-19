@@ -8,12 +8,14 @@ right pose is the one whose frustum contains essentially all of the group:
 
     score(g, t) = |U_g \\cap V_t| / |U_g|,     U_g = union of group g's masks
 
-Two estimates are reported.  The free per-group ``argmax_t`` is noisy — adjacent
-poses of a 10 Hz trajectory look almost identical, and the margin over the
-runner-up is ~0.01.  The constrained fit ``t = round(a*g + b)`` over a grid of
-(a, b) is what should actually be used: annotations were produced at a fixed
-frame stride, so two parameters describe the whole video and neighbouring-pose
-noise averages out.
+Two estimates are reported.  The free per-group ``argmax_t`` is not safe — adjacent
+poses of a 10 Hz trajectory look almost identical and the margin over the
+runner-up is ~0.015, so argmax flips between neighbours and can even cross them.
+The line ``t = round(a*g + b)`` fitted over a grid of (a, b) pins the stride,
+and a banded monotone DP around that line then picks the best *increasing*
+assignment — groups are emitted in capture order, so an assignment that goes
+backwards is wrong by construction.  ``group_to_pose`` in the output file is the
+DP result; the free argmax is stored alongside only for diagnosis.
 
 The recovered mapping doubles as an end-to-end check of the geometry: with a
 wrong pose convention, intrinsics pairing or z-buffer, no pose would cover a
@@ -60,6 +62,50 @@ def visibility_matrix(coord, track, **kw):
     return V
 
 
+def monotone_align(S, fit_t, band=30):
+    """Best strictly increasing assignment of groups to poses, inside a band.
+
+    Independent per-group argmax is not safe here: neighbouring poses of a 10 Hz
+    trajectory are near-identical and the margin over the runner-up is ~0.015, so
+    argmax flips back and forth and can cross frames.  Annotation groups are
+    emitted in capture order, so the assignment must be increasing; enforcing
+    that turns a set of near-ties into one globally consistent path.  The band
+    around the fitted line keeps it O(G x band) and stops a single bad group from
+    dragging the path away.
+
+        dp[g][f] = S[g][f] + max_{f' < f} dp[g-1][f']
+
+    Returns (assignment, total score).
+    """
+    G, F = S.shape
+    lo = np.clip(fit_t - band, 0, F - 1)
+    hi = np.clip(fit_t + band + 1, 1, F)
+    NEG = -1e18
+    dp = np.full((G, F), NEG)
+    back = np.zeros((G, F), dtype=np.int64)
+    dp[0, lo[0]:hi[0]] = S[0, lo[0]:hi[0]]
+    for g in range(1, G):
+        run, arg = NEG, -1
+        best = np.full(F, NEG)
+        argbest = np.zeros(F, dtype=np.int64)
+        for f in range(F):                      # prefix max over strictly smaller f
+            best[f], argbest[f] = run, arg
+            if dp[g - 1, f] > run:
+                run, arg = dp[g - 1, f], f
+        sl = slice(lo[g], hi[g])
+        dp[g, sl] = S[g, sl] + best[sl]
+        back[g, sl] = argbest[sl]
+        dp[g, sl] = np.where(best[sl] <= NEG / 2, NEG, dp[g, sl])
+    end = int(np.argmax(dp[G - 1]))
+    if dp[G - 1, end] <= NEG / 2:
+        return fit_t.copy(), float("nan")       # no feasible increasing path in band
+    out = np.zeros(G, dtype=np.int64)
+    out[G - 1] = end
+    for g in range(G - 1, 0, -1):
+        out[g - 1] = back[g, out[g]]
+    return out, float(dp[G - 1, end])
+
+
 def fit_stride(unions, V, n_pose, n_group):
     """Grid-search t = round(a*g + b); returns (a, b, mapping, mean score)."""
     a0 = n_pose / max(n_group, 1)
@@ -80,8 +126,8 @@ def main() -> None:
     ap.add_argument("--src", default="gsam2", choices=["gsam2", "seem"])
     ap.add_argument("--z-far", type=float, default=8.0)
     ap.add_argument("--write", action="store_true")
-    ap.add_argument("--refine-window", type=int, default=5,
-                    help="poses either side of the fitted line to search")
+    ap.add_argument("--refine-window", type=int, default=30,
+                    help="band, in poses, around the fitted line for the monotone DP")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -99,13 +145,7 @@ def main() -> None:
     free_s = S.max(1)
     fit_s, a, b, fit_t = fit_stride(unions, V, F, G)
 
-    # Refine inside a window around the fitted line: keeps the per-group accuracy
-    # of the free argmax while dropping the gross outliers a 10 Hz trajectory's
-    # near-identical neighbouring poses produce.
-    w = args.refine_window
-    lo = np.clip(fit_t - w, 0, F - 1)
-    ref_t = np.array([lo[g] + int(np.argmax(S[g, lo[g]:min(lo[g] + 2 * w + 1, F)]))
-                      for g in range(G)])
+    ref_t, _ = monotone_align(S, fit_t, band=args.refine_window)
     ref_s = S[np.arange(G), ref_t]
 
     print(f"{scene}  N={len(coord)} groups={G} poses={F} poses/group={F/G:.2f} "
@@ -118,7 +158,8 @@ def main() -> None:
               f"margin-over-2nd={np.mean(free_s - np.sort(S,1)[:,-2]):.4f}")
         print(f"  refnd : median={np.median(ref_s):.4f} min={ref_s.min():.4f} "
               f"frac>0.90={np.mean(ref_s > 0.90):.3f} "
-              f"|t_ref - t_fit| median={np.median(np.abs(ref_t - fit_t)):.1f}")
+              f"|t_ref-t_fit| med={np.median(np.abs(ref_t - fit_t)):.1f} "
+              f"increasing={bool(np.all(np.diff(ref_t) > 0))}")
 
     if args.write:
         out = os.path.join(args.scene_dir, f"frames.{args.src}.npz")

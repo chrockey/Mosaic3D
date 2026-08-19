@@ -271,13 +271,23 @@ class CaptionLoss(CaptionLossBase):
                 text_features.to(device), labels_per_segment.to(device)
             )
 
+        # Only the rows named by point_indices are ever read, so build the (N, K)
+        # matrix over the unique ones instead of every point in the batch.
+        # log_softmax is row-wise, so this is exactly equal to indexing afterwards
+        # -- it just does not allocate the rows that get thrown away.  With single
+        # views the saving is what makes a large batch fit: a frame's masks cover
+        # roughly half its points, and both `logits` and the fp32 log_softmax
+        # output are held for backward.
+        point_indices = point_indices.to(device)
+        rows, inverse = torch.unique(point_indices, return_inverse=True)
+
         # Logit
-        logits = point_features @ text_features.T.to(device)
+        logits = point_features[rows] @ text_features.T.to(device)
         if self.use_logit_scale:
             logits = self.logit_scale.exp() * logits
         scores = F.log_softmax(logits, dim=-1)
 
-        rep_scores = scores[point_indices]
+        rep_scores = scores[inverse]
         reduced_scores = segment_csr(rep_scores, caption_offsets.to(device), reduce="mean")
 
         # Compute the loss
