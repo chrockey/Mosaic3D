@@ -25,6 +25,18 @@
 #   batch 4 -> 64/GPU      frames are ~5.4x smaller than scenes; see data/ark_frame.
 #   logit_scale frozen, caption negatives gathered across ranks
 #                        -- see model/loss/caption_egocentric.
+#   validation           REMOVED from the loop; snapshots every 500 steps instead.
+#
+# Zero-shot baseline of the start point, measured on our own image (312 ScanNet
+# val scenes, batch 4, 1xB200, precision 16-mixed):
+#     scannet200 mIoU 0.16007   head 0.32943 / common 0.11242 / tail 0.03254
+#     scannet20  mIoU_all 0.47871
+# Reproduce, or evaluate any snapshot, with:
+#     python src/eval.py experiment=train_spunet_multidata_ppt data=sc \
+#         model=spunet101+ppt ckpt_path=<ckpt> +trainer.precision=16-mixed \
+#         "data.train_dataset.conditions=[ScanNet,ARKitScenes,ScanNetPP]"
+# trainer.precision=bf16-true CRASHES: spconv-cu124 2.3.8 has no bf16 entry in
+# _TORCH_DTYPE_TO_TV (spconv/pytorch/cppcore.py:79).  16-mixed is the proven setting.
 
 defaults:
   - override /data: ark_frame
@@ -41,8 +53,13 @@ seed: 12345
 trainer:
   max_steps: 4000
   max_epochs: -1
-  val_check_interval: 500
-  check_val_every_n_epoch: null
+  # No in-loop validation (user directive 2026-08-19).  ScanNet200 val costs a
+  # pass over 312 full scenes every time it runs and does not steer anything
+  # here, because checkpoint selection is by step, not by metric.  Every snapshot
+  # stays evaluable after the fact with src/eval.py, which is the same code path
+  # that produced the zero-shot baseline below.
+  limit_val_batches: 0
+  num_sanity_val_steps: 0
   gradient_clip_val: 1.0
   # BatchNorm statistics are the first thing a distribution shift breaks: the
   # released stats come from ~150k-point reconstructions, a frame is ~28k points
@@ -58,9 +75,19 @@ model:
     final_div_factor: 1000.0
   best_metric: ${data.checkpoint_monitor}
 
+# Nothing to test at the end either -- the snapshots are evaluated separately.
+test: False
+
 callbacks:
+  # Nothing is monitored, so save an unconditional snapshot every 500 steps and
+  # keep them all: with no validation curve, the only way to choose is to eval
+  # the snapshots afterwards.
   model_checkpoint:
-    monitor: ${data.checkpoint_monitor}
+    monitor: null
+    save_top_k: -1
+    every_n_train_steps: 500
+    save_last: True
+    filename: "step_{step:06d}"
 
 logger:
   wandb:

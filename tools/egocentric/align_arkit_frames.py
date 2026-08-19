@@ -55,11 +55,30 @@ def load_groups(scene_dir: str, src: str):
     return groups, caps
 
 
-def visibility_matrix(coord, track, **kw):
-    V = np.zeros((len(track), len(coord)), dtype=bool)
-    for i in range(len(track)):
-        V[i, visible_indices(coord, track.R[i], track.t[i], track.K[i], track.wh[i], **kw)] = True
-    return V
+def score_matrix(coord, track, unions, **kw):
+    """(G, F) containment scores, without ever holding a (F, N) visibility matrix.
+
+    Materialising visibility for every pose costs len(track) x len(coord) bytes --
+    ~1 GB for a large scene -- and 48 workers streaming that are bound by memory
+    bandwidth, not cores.  Only |U_g n V_t| / |U_g| is ever needed, so the poses
+    are streamed: one N-byte boolean at a time, scored against every group on the
+    spot.  Same numbers, ~1000x less memory.
+
+    Also returns the visible-point count per pose, for the frame-size filter.
+    """
+    G, F, N = len(unions), len(track), len(coord)
+    S = np.zeros((G, F), dtype=np.float32)
+    n_vis = np.zeros(F, dtype=np.int64)
+    vis = np.zeros(N, dtype=bool)
+    for i in range(F):
+        idx = visible_indices(coord, track.R[i], track.t[i], track.K[i], track.wh[i], **kw)
+        n_vis[i] = len(idx)
+        vis[idx] = True
+        for g, u in enumerate(unions):
+            if len(u):
+                S[g, i] = vis[u].mean()
+        vis[idx] = False       # cheaper than reallocating an N-byte array per pose
+    return S, n_vis
 
 
 def monotone_align(S, fit_t, band=30):
@@ -106,16 +125,17 @@ def monotone_align(S, fit_t, band=30):
     return out, float(dp[G - 1, end])
 
 
-def fit_stride(unions, V, n_pose, n_group):
-    """Grid-search t = round(a*g + b); returns (a, b, mapping, mean score)."""
+def fit_stride(S, n_pose, n_group):
+    """Grid-search t = round(a*g + b) against the score matrix; -> (score, a, b, t)."""
     a0 = n_pose / max(n_group, 1)
+    rows = np.arange(n_group)
     best = None
     for a in np.arange(a0 - 0.6, a0 + 0.6 + 1e-9, 0.02):
         for b in np.arange(-1.5 * a0, 1.5 * a0 + 1e-9, 1.0):
-            t = np.clip(np.round(a * np.arange(n_group) + b).astype(int), 0, n_pose - 1)
-            s = np.mean([V[t[g], u].mean() if len(u) else 0.0 for g, u in enumerate(unions)])
+            t = np.clip(np.round(a * rows + b).astype(int), 0, n_pose - 1)
+            s = float(S[rows, t].mean())
             if best is None or s > best[0]:
-                best = (float(s), float(a), float(b), t)
+                best = (s, float(a), float(b), t)
     return best
 
 
@@ -137,13 +157,11 @@ def main() -> None:
     track = load_arkit_track(args.video_dir)
     G, F = len(groups), len(track)
 
-    V = visibility_matrix(coord, track, z_far=args.z_far)
     unions = [np.unique(np.concatenate(g)) if len(g) else np.empty(0, np.int64) for g in groups]
-
-    S = np.stack([V[:, u].mean(axis=1) if len(u) else np.zeros(F) for u in unions])  # (G, F)
+    S, n_vis = score_matrix(coord, track, unions, z_far=args.z_far)
     free_t = S.argmax(1)
     free_s = S.max(1)
-    fit_s, a, b, fit_t = fit_stride(unions, V, F, G)
+    fit_s, a, b, fit_t = fit_stride(S, F, G)
 
     ref_t, _ = monotone_align(S, fit_t, band=args.refine_window)
     ref_s = S[np.arange(G), ref_t]
@@ -151,7 +169,7 @@ def main() -> None:
     print(f"{scene}  N={len(coord)} groups={G} poses={F} poses/group={F/G:.2f} "
           f"| free={free_s.mean():.4f} fit={fit_s:.4f} refined={ref_s.mean():.4f} a={a:.2f} b={b:.1f} "
           f"| agree(|dt|<=2)={np.mean(np.abs(free_t - fit_t) <= 2):.3f} "
-          f"vis/pose={V.sum(1).mean():.0f}")
+          f"vis/pose={n_vis.mean():.0f}")
     if not args.quiet:
         print(f"  free  : median={np.median(free_s):.4f} min={free_s.min():.4f} "
               f"frac>0.90={np.mean(free_s > 0.90):.3f} "
@@ -167,7 +185,7 @@ def main() -> None:
                  fit_pose=fit_t.astype(np.int64),
                  free_pose=free_t.astype(np.int64), free_score=free_s.astype(np.float32),
                  stride_a=np.float32(a), stride_b=np.float32(b),
-                 n_visible=V.sum(1)[ref_t].astype(np.int64))
+                 n_visible=n_vis[ref_t].astype(np.int64))
         print("  wrote", out)
 
 
