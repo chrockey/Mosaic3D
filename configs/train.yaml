@@ -58,5 +58,10 @@ test: True
 # simply provide checkpoint path to resume training
 ckpt_path: null
 
+# weights-only start point: loads a state_dict and nothing else (no optimizer
+# state, no epoch, no LR schedule).  Use this, not ckpt_path, to post-train a
+# finished encoder on a new input distribution.
+init_weights_from: null
+
 # seed for random number generators in pytorch, numpy and python.random
 seed: null

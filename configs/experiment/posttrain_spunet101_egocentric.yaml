@@ -1,0 +1,68 @@
+# @package _global_
+#
+# Post-training the released spunet101 encoder on single-view (egocentric) clouds.
+#
+#   python src/train.py experiment=posttrain_spunet101_egocentric \
+#       init_weights_from=/path/to/spunet101.ckpt
+#
+# spunet101.ckpt is the MULTIDATA checkpoint (ScanNet + ARKitScenes + ScanNet++),
+# so it has already seen these very scenes as complete reconstructions.  Training
+# on their frusta therefore introduces no new scene content and isolates exactly
+# one variable: full reconstruction -> single view.
+#
+# The released recipe, for reference (configs/experiment/train_spunet_scannet.yaml,
+# optim/sgd.yaml, scheduler/onecyclelr.yaml): SGD 0.05 nesterov, wd 1e-4,
+# OneCycle pct_start 0.05 div 10 final_div 1e4, 4 scenes/GPU x 8 A100, 128 epochs
+# = 57,600 steps, 16-mixed, no grad clip, no EMA.
+#
+# What changes here and why:
+#   lr 0.05 -> 0.005     one tenth: the encoder is converged, only its input
+#                        distribution moved.
+#   pct_start 0.05 -> 0.1  longer warmup, for the same reason.
+#   final_div 1e4 -> 1e3   same 5e-6 floor from a 10x lower peak.
+#   57,600 -> 4,000 steps  post-training, not retraining.
+#   grad clip none -> 1.0  cheap insurance while the distribution shifts.
+#   batch 4 -> 64/GPU      frames are ~5.4x smaller than scenes; see data/ark_frame.
+#   logit_scale frozen, caption negatives gathered across ranks
+#                        -- see model/loss/caption_egocentric.
+
+defaults:
+  - override /data: ark_frame
+  - override /model: spunet101+ppt
+  - override /model/clip: recap_clip
+  - override /model/loss: caption_egocentric
+  - override /optim: sgd
+  - override /scheduler: onecyclelr
+  - override /callbacks: cluster_nolr
+  - override /trainer: ddp
+
+seed: 12345
+
+trainer:
+  max_steps: 4000
+  max_epochs: -1
+  val_check_interval: 500
+  check_val_every_n_epoch: null
+  gradient_clip_val: 1.0
+  # BatchNorm statistics are the first thing a distribution shift breaks: the
+  # released stats come from ~150k-point reconstructions, a frame is ~28k points
+  # in a frustum.  Averaging them over all 4 ranks re-estimates them from 256
+  # frames per step instead of 64.
+  sync_batchnorm: True
+
+model:
+  optimizer:
+    lr: 5e-3
+  scheduler:
+    pct_start: 0.1
+    final_div_factor: 1000.0
+  best_metric: ${data.checkpoint_monitor}
+
+callbacks:
+  model_checkpoint:
+    monitor: ${data.checkpoint_monitor}
+
+logger:
+  wandb:
+    tags: ${tags}
+    group: "mosaic3d-egocentric"

@@ -174,11 +174,37 @@ class DenseCaptionAlignmentLoss(CaptionLossBase):
 
 
 class CaptionLoss(CaptionLossBase):
+    """Per-point contrastive loss against the batch's caption embeddings.
+
+    Two options exist for post-training on single-view clouds, both off by
+    default so the released recipe is bit-for-bit unchanged:
+
+    ``freeze_logit_scale``
+        The released spunet101.ckpt carries a *learned* temperature
+        (logit_scale = 5.08385, exp = 161.4, tau = 0.0062) calibrated on the
+        statistics of full-scene batches.  A single frame contributes ~5 masks
+        instead of up to 300, so the negative pool changes by an order of
+        magnitude and a temperature left free will chase that shift.  Pinning it
+        keeps the objective's geometry identical to pretraining.
+
+    ``gather_text``
+        The softmax denominator is the set of unique captions in the *local*
+        batch.  Frames carry ~5 masks each against a full scene's ~300, so the
+        denominator collapses (with one unique caption log_softmax is exactly 0
+        and the gradient vanishes).  This shares the caption embeddings across
+        ranks so the denominator is the whole global batch, which widens the
+        negatives without touching the loss form the way switching to
+        ``CaptionCLIPLoss`` would.  Text features are frozen, so no autograd has
+        to cross the all_gather.
+    """
+
     def __init__(
         self,
         normalize: bool = True,
         use_logit_scale: Optional[bool] = False,
         reduction: Literal["mean", "weighted_sum"] = "weighted_sum",
+        freeze_logit_scale: bool = False,
+        gather_text: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -187,10 +213,37 @@ class CaptionLoss(CaptionLossBase):
         assert reduction in ["mean", "weighted_sum"]
         self.reduction = reduction
         self.use_logit_scale = use_logit_scale
+        self.gather_text = gather_text
         if use_logit_scale:
-            self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07), requires_grad=True)
+            self.logit_scale = nn.Parameter(
+                torch.ones([]) * np.log(1 / 0.07), requires_grad=not freeze_logit_scale
+            )
 
         self.kwargs = kwargs
+
+    @staticmethod
+    def _gather_text(text_features: Tensor, labels_per_segment: Tensor):
+        """Union the per-rank caption embeddings; returns (features, shifted labels).
+
+        Rows are deduplicated after the gather, so a caption produced on two
+        ranks stays one column instead of becoming its own negative.
+        """
+        if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+            return text_features, labels_per_segment
+        world = dist.get_world_size()
+        n = torch.tensor([text_features.shape[0]], device=text_features.device)
+        sizes = [torch.zeros_like(n) for _ in range(world)]
+        dist.all_gather(sizes, n)
+        sizes = [int(x.item()) for x in sizes]
+        biggest = max(sizes)
+        padded = text_features.new_zeros((biggest, text_features.shape[1]))
+        padded[: text_features.shape[0]] = text_features
+        bucket = [torch.zeros_like(padded) for _ in range(world)]
+        dist.all_gather(bucket, padded)
+        gathered = torch.cat([b[:s] for b, s in zip(bucket, sizes)], dim=0)
+        offset = sum(sizes[: dist.get_rank()])
+        uniq, inverse = torch.unique(gathered, dim=0, return_inverse=True)
+        return uniq, inverse[labels_per_segment.to(inverse.device) + offset]
 
     def loss(
         self,
@@ -212,6 +265,11 @@ class CaptionLoss(CaptionLossBase):
         # normalize point features
         if self.normalize:
             point_features = nn.functional.normalize(point_features, dim=-1)
+
+        if self.gather_text:
+            text_features, labels_per_segment = self._gather_text(
+                text_features.to(device), labels_per_segment.to(device)
+            )
 
         # Logit
         logits = point_features @ text_features.T.to(device)

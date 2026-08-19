@@ -1,0 +1,161 @@
+# ARKitScenes as SINGLE-VIEW frames, for post-training the released encoder on
+# egocentric clouds.  Diffs from configs/data/sc.yaml, all deliberate:
+#
+#   * dataset      ARKitScenesFrameDataset -- one sample = one annotated frame
+#                  (the scene points that camera saw), not a whole reconstruction.
+#   * CenterShift(apply_z=true)  DROPPED.  The dataset already shifts by the FULL
+#                  scene's xy bbox centre and z-min.  Applied per frame it would
+#                  put the lowest *visible* point at z=0, and a view of a tabletop
+#                  has no floor in it, so "height above the floor" would mean
+#                  something different in every sample.
+#   * SphereCrop   DROPPED.  point_max=250000 never triggers at frame scale
+#                  (mean 28k points), and cutting a sphere out of a frustum makes
+#                  a shape that occurs in neither pretraining nor deployment.
+#   * num_masks    unset.  A frame carries ~5 masks; there is nothing to subsample.
+#   * batch_size   64/GPU.  Frames are ~5.4x smaller than scenes, and the softmax
+#                  denominator is the batch's unique captions -- at the released
+#                  batch of 4 it would fall from ~1200 captions to ~21.  64/GPU
+#                  x 4 GPUs with loss gather_text restores the pretraining pool.
+#
+# Everything else (rotation, scale, flip, jitter, elastic, chromatic, colour
+# normalisation, 2 cm grid) is byte-identical to the released recipe.
+
+_target_: src.data.datamodule.MultiDataModule
+
+train_dataset:
+  _target_: src.data.multi_dataloader.ConcatDataset
+  _partial_: true
+  ignore_label: -100
+  conditions: ["ARKitScenes"]
+  repeat: 1
+  datasets:
+    - _target_: src.data.egocentric.arkit_frame_dataset.ARKitScenesFrameDataset
+      _partial_: true
+      data_dir: /datasets/mosaic3d/data/arkitscenes
+      raw_dir: /datasets/mosaic3d/arkit_raw
+      split: train
+      ignore_label: -100
+      repeat: 1
+      num_masks: null
+      align_source: gsam2
+      min_score: 0.5
+      min_mask_points: 32
+      min_frame_points: 2000
+      max_frame_points: 200000
+      pose_jitter: 5          # +-0.5 s on a 10 Hz track: a real, mild view change
+      fov_jitter: 0.15        # the encoder must not be tied to the iPad's f=213
+      z_far: 8.0
+      z_far_jitter: [3.0, 8.0]  # consumer and robot depth cameras are range limited
+      transforms:
+        - type: FilterCaption
+          min_words: 1
+          max_words: 50
+          min_letter_ratio: 0.5
+          max_repetition_ratio: 0.4
+          max_consecutive: 3
+        - type: Copy
+          keys_dict:
+            coord: origin_coord
+        - type: RandomRotate
+          p: 0.5
+          angle: [-1, 1]
+          center: [0, 0, 0]
+          axis: "z"
+        - type: RandomRotate
+          p: 0.5
+          angle: [-0.015625, 0.015625]
+          axis: "x"
+        - type: RandomRotate
+          p: 0.5
+          angle: [-0.015625, 0.015625]
+          axis: "y"
+        - type: RandomScale
+          scale: [0.9, 1.1]
+        - type: RandomFlip
+          p: 0.5
+        - type: RandomJitter
+          sigma: 0.005
+          clip: 0.02
+        - type: ElasticDistortion
+        - type: ChromaticAutoContrast
+          p: 0.2
+        - type: ChromaticTranslation
+          p: 0.95
+          ratio: 0.05
+        - type: ChromaticJitter
+          p: 0.95
+          std: 0.05
+        - type: CenterShift
+          apply_z: false
+        - type: NormalizeColor
+        - type: Add
+          keys_dict:
+            condition: ARKitScenes
+        - type: ToTensor
+        - type: Collect
+          keys:
+            [
+              "origin_coord",
+              "coord",
+              "color",
+              "segment",
+              "instance",
+              "binary",
+              "caption_data",
+              "origin_idx",
+              "condition",
+            ]
+          offset_keys_dict:
+            offset: coord
+            pc_count: origin_coord
+          feat_keys: ["color"]
+
+# Validation stays on FULL ScanNet200 scenes: it is the released benchmark and the
+# catastrophic-forgetting guard.  The egocentric metric is a separate eval
+# (tools/egocentric/eval_scannet_frames.py) so a single number here never hides a
+# collapse on reconstructions.
+val_datasets:
+  - _target_: src.data.scannet.dataset.ScanNet200Dataset
+    _partial_: true
+    data_dir: /datasets/mosaic3d/data/scannet
+    split: val
+    ignore_label: ${data.train_dataset.ignore_label}
+    transforms:
+      - type: Copy
+        keys_dict:
+          coord: origin_coord
+      - type: CenterShift
+        apply_z: true
+      - type: NormalizeColor
+      - type: Add
+        keys_dict:
+          condition: ScanNet
+      - type: ToTensor
+      - type: Collect
+        keys:
+          [
+            "origin_coord",
+            "coord",
+            "color",
+            "segment",
+            "instance",
+            "binary",
+            "caption_data",
+            "origin_idx",
+            "condition",
+          ]
+        offset_keys_dict:
+          offset: coord
+          pc_count: origin_coord
+        feat_keys: ["color"]
+
+collate_fn:
+  _target_: src.data.utils.collate.point_collate_fn_with_masks
+  _partial_: true
+  grid_size: 0.02
+
+batch_size: 64
+num_workers: 12
+in_channel: 3
+
+checkpoint_monitor: "val_scannet200/miou"

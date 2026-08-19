@@ -85,6 +85,28 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         log_hyperparameters(object_dict)
     # For HPC specific signal handler.
     signal_handler = HPCSignalHandler(trainer)
+    if cfg.get("init_weights_from"):
+        # Post-training start point: take the WEIGHTS of a finished run but none of
+        # its optimizer state, epoch counter or LR schedule.  ckpt_path would
+        # resume all of that, which is wrong when the point is a fresh, much
+        # shorter schedule at a lower learning rate on a shifted input
+        # distribution.  The released encoder ckpts are stripped to a bare
+        # state_dict, so they cannot be passed as ckpt_path anyway.
+        import torch as _torch
+
+        log.info(f"Initialising weights from {cfg.init_weights_from}")
+        model.configure_model()
+        _ckpt = _torch.load(cfg.init_weights_from, map_location="cpu")
+        _sd = _ckpt.get("state_dict", _ckpt)
+        for _k in [k for k in _sd if "emb_target" in k]:  # ScanNet20 <-> ScanNet200
+            del _sd[_k]
+        _missing, _unexpected = model.load_state_dict(_sd, strict=False)
+        log.info(f"  loaded {len(_sd)} tensors | missing={len(_missing)} unexpected={len(_unexpected)}")
+        if _missing:
+            log.warning(f"  missing (first 10): {list(_missing)[:10]}")
+        if _unexpected:
+            log.warning(f"  unexpected (first 10): {list(_unexpected)[:10]}")
+
     if cfg.get("train"):
         log.info("Starting training!")
         with signal_handler:
