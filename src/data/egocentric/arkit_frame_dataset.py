@@ -235,4 +235,11 @@ class ARKitScenesFrameDataset(AnnotatedDataset):
                 keep_cap = [keep_cap[i] for i in sel]
             data["caption_data"] = dict(idx=keep_idx, caption=keep_cap)
 
-        return self.transforms(data)
+        data = self.transforms(data)
+        # The :226 guard runs BEFORE the transforms, and FilterCaption can still
+        # reject every surviving caption (measured 3 in 28,000 samples). An empty
+        # caption list reaches torch.cat([]) in the collate and kills the worker,
+        # which hangs the other three ranks.
+        if self.is_train and not data["caption_data"]["idx"]:
+            return None
+        return data

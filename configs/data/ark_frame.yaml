@@ -26,7 +26,11 @@ train_dataset:
   _target_: src.data.multi_dataloader.ConcatDataset
   _partial_: true
   ignore_label: -100
-  conditions: ["ARKitScenes"]
+  # Three, not one. This list sizes net.embedding_table (PPT's condition embedding),
+  # and the released spunet101.ckpt carries 3 rows; one row is a load_state_dict
+  # shape mismatch before step 0. ConcatDataset swallows the kwarg unused, and the
+  # per-sample tag stays ARKitScenes (the Add transform below).
+  conditions: ["ScanNet", "ARKitScenes", "ScanNetPP"]
   repeat: 1
   datasets:
     - _target_: src.data.egocentric.arkit_frame_dataset.ARKitScenesFrameDataset
@@ -38,6 +42,11 @@ train_dataset:
       repeat: 1
       num_masks: null
       align_source: gsam2
+      # gsam2 ONLY. frames.<src>.npz is written from the gsam2 grouping and there is
+      # no frames.seem.npz; group counts differ between the two sources in 17.0% of
+      # scenes, so a seem draw would index a different frame. Measured effect of
+      # leaving both in: ~8.5% of samples get a shifted index, coverage 0.6143.
+      anno_sources: ["gsam2"]
       min_score: 0.5
       min_mask_points: 32
       min_frame_points: 2000

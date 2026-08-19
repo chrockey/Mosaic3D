@@ -96,11 +96,18 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
         log.info(f"Initialising weights from {cfg.init_weights_from}")
         model.configure_model()
-        _ckpt = _torch.load(cfg.init_weights_from, map_location="cpu")
+        _ckpt = _torch.load(cfg.init_weights_from, map_location="cpu", weights_only=False)
         _sd = _ckpt.get("state_dict", _ckpt)
         for _k in [k for k in _sd if "emb_target" in k]:  # ScanNet20 <-> ScanNet200
             del _sd[_k]
         _missing, _unexpected = model.load_state_dict(_sd, strict=False)
+        # SpUNet's v1m1_base backbone never reads PPT's `context`, so
+        # net.embedding_table receives no gradient and DDP with
+        # find_unused_parameters=False aborts on the first step. PointWAM freezes it
+        # for the same reason (pointwam/mosaic3d_wcn.py:601).
+        for _n, _p in model.net.named_parameters():
+            if "embedding_table" in _n:
+                _p.requires_grad_(False)
         log.info(f"  loaded {len(_sd)} tensors | missing={len(_missing)} unexpected={len(_unexpected)}")
         if _missing:
             log.warning(f"  missing (first 10): {list(_missing)[:10]}")

@@ -254,6 +254,13 @@ class DenseLanguageLitModule(LitModuleBase):
         )
         return loss
 
+    def on_fit_start(self):
+        # children() hides clip_encoder from nn.Module._apply, so .to(device) skips
+        # it, and on_validation_epoch_start below is the only other place it moves.
+        # A run with validation disabled (limit_val_batches=0) would leave the text
+        # tower on CPU and fail at step 1.
+        self.clip_encoder = self.clip_encoder.to(self.device)
+
     def on_validation_epoch_start(self):
         self.clip_encoder = self.clip_encoder.to(self.device)
         for postfix in self.val_class_info.keys():
