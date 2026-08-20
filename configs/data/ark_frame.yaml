@@ -119,44 +119,20 @@ train_dataset:
             pc_count: origin_coord
           feat_keys: ["color"]
 
-# Validation stays on FULL ScanNet200 scenes: it is the released benchmark and the
-# catastrophic-forgetting guard.  The egocentric metric is a separate eval
-# (tools/egocentric/eval_scannet_frames.py) so a single number here never hides a
-# collapse on reconstructions.
-val_datasets:
-  - _target_: src.data.scannet.dataset.ScanNet200Dataset
-    _partial_: true
-    data_dir: /datasets/mosaic3d/data/scannet
-    split: val
-    ignore_label: ${data.train_dataset.ignore_label}
-    transforms:
-      - type: Copy
-        keys_dict:
-          coord: origin_coord
-      - type: CenterShift
-        apply_z: true
-      - type: NormalizeColor
-      - type: Add
-        keys_dict:
-          condition: ScanNet
-      - type: ToTensor
-      - type: Collect
-        keys:
-          [
-            "origin_coord",
-            "coord",
-            "color",
-            "segment",
-            "instance",
-            "binary",
-            "caption_data",
-            "origin_idx",
-            "condition",
-          ]
-        offset_keys_dict:
-          offset: coord
-          pc_count: origin_coord
-        feat_keys: ["color"]
+# NO validation (user directive 2026-08-19, reaffirmed 2026-08-20). Empty, not just
+# limit_val_batches=0: DataModule.setup builds val_datasets unconditionally
+# (src/data/datamodule.py:37-38), regardless of stage or limit_val_batches, and
+# BaseDataset asserts its data_dir exists. Leaving a ScanNet val entry here would
+# make the training pod depend on /datasets/mosaic3d/data/scannet for a dataloader
+# that is never iterated.
+#
+# Checkpoint selection is by step instead: a snapshot every 500 steps, all kept.
+# To evaluate one afterwards (this is the command that produced the 0.16007
+# ScanNet200 mIoU start point):
+#   python3.10 src/eval.py experiment=train_spunet_multidata_ppt data=sc \
+#     model=spunet101+ppt ckpt_path=<ckpt> +trainer.precision=16-mixed \
+#     "data.train_dataset.conditions=[ScanNet,ARKitScenes,ScanNetPP]"
+val_datasets: []
 
 collate_fn:
   _target_: src.data.utils.collate.point_collate_fn_with_masks
