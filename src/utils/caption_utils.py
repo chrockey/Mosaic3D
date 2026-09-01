@@ -60,7 +60,6 @@ def get_unique_caption_batch(
     else:
         caption_embeds = forward_text_encoder(unique_captions, clip_encoder)
 
-    caption_embeds = forward_text_encoder(unique_captions, clip_encoder)
     caption_embeds = torch.nn.functional.normalize(caption_embeds, dim=-1)
 
     return (

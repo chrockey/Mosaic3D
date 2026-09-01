@@ -19,8 +19,9 @@ experiments/dexjoco-human-pretraining-plan.md; the first is PointWAM tools/probe
         [--n 512] [--batch 64] [--seed 0] [--out results.json]
 
 Deterministic: clip index 0 of each episode (val mode), a fixed subset of episodes, no augmentation
-(the val transform list drops every Random*/Elastic/Chromatic op and keeps grid, centring, colour
-normalisation and the condition tag).
+(the val transform list drops every Random*/Elastic/Chromatic op and keeps FilterCaption, Copy,
+centring, colour normalisation and the condition tag; voxelisation happens inside the net from the
+collate's grid_size).  Locally: --data-dir /home/jovyan/cholab/datasets/mosaic3d-posttrain/egodex.
 """
 from __future__ import annotations
 
@@ -41,7 +42,8 @@ from torch_scatter import segment_csr
 
 # transforms of the training list that must NOT run at eval
 _AUG = {"RandomRotate", "RandomScale", "RandomFlip", "RandomJitter", "ElasticDistortion",
-        "ChromaticAutoContrast", "ChromaticTranslation", "ChromaticJitter", "Copy"}
+        "ChromaticAutoContrast", "ChromaticTranslation", "ChromaticJitter"}
+# NOT Copy: it is deterministic and the only producer of origin_coord, which Collect's pc_count reads.
 
 
 def load_net_state(path: str) -> dict:
@@ -58,7 +60,7 @@ def main() -> int:
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="")
-    ap.add_argument("--data-dir", default="/datasets/mosaic3d-posttrain/egodex")
+    ap.add_argument("--data-dir", default=os.environ.get("M3D_DATASETS", "/datasets") + "/mosaic3d-posttrain/egodex")
     a = ap.parse_args()
 
     import hydra
@@ -75,10 +77,12 @@ def main() -> int:
     module.configure_model()
     net_sd = load_net_state(a.ckpt)
     missing, unexpected = module.net.load_state_dict(net_sd, strict=False)
-    missing = [k for k in missing if not k.startswith("clip_encoder")]
     print(f"[ckpt] {a.ckpt}: {len(net_sd)} net tensors, missing {len(missing)}, unexpected {len(unexpected)}")
-    if missing or unexpected:
-        print("   missing:", missing[:5], "unexpected:", unexpected[:5])
+    if not net_sd or missing or unexpected:
+        # a wrong file (e.g. a PointWAM model-step*.pt, whose keys start with scene_feature_encoder.)
+        # must not score a randomly initialised backbone
+        raise SystemExit(f"checkpoint does not match module.net: {len(net_sd)} net tensors, "
+                         f"missing {missing[:5]}, unexpected {unexpected[:5]}")
     dev = torch.device("cuda")
     module = module.to(dev).eval()
     module.clip_encoder = module.clip_encoder.to(dev).eval()
@@ -87,7 +91,7 @@ def main() -> int:
     ds_cfg = OmegaConf.to_container(cfg.data.train_dataset.datasets[0], resolve=True)
     tf = [t for t in ds_cfg["transforms"] if t["type"] not in _AUG]
     from src.data.egodex.egodex_clip_dataset import EgoDexClipDataset
-    ds = EgoDexClipDataset(data_dir=a.data_dir, split="val", transforms=tf, with_captions=True,
+    ds = EgoDexClipDataset(data_dir=a.data_dir, split="val", transforms=OmegaConf.create(tf), with_captions=True,
                            min_mask_points=ds_cfg["min_mask_points"], min_clip_points=ds_cfg["min_clip_points"],
                            require_visible=ds_cfg["require_visible"])
     rng = np.random.default_rng(a.seed)
@@ -126,13 +130,18 @@ def main() -> int:
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
         text, seg_to_unique, _ = get_unique_caption_batch([seg_caps], module.clip_encoder)
     text = torch.nn.functional.normalize(text.float(), dim=-1).cpu()
-    seg_to_unique = torch.as_tensor(np.asarray(seg_to_unique)).long().cpu()
+    seg_to_unique = seg_to_unique.long().cpu()
     sim = seg_feats @ text.T                                   # (S, U)
     target = sim[torch.arange(sim.shape[0]), seg_to_unique]    # own caption's similarity
-    rank = (sim > target[:, None]).sum(1)                      # 0 = top-1
+    # ties: optimistic rank counts only strictly-better captions, pessimistic counts ties against us
+    rank_lo = (sim > target[:, None]).sum(1)                   # 0 = top-1
+    rank_hi = (sim >= target[:, None]).sum(1) - 1
+    rank = (rank_lo.float() + rank_hi.float()) / 2             # mid-rank, what is reported
     res = dict(ckpt=a.ckpt, clips=n_ok, segments=int(sim.shape[0]), unique_captions=int(sim.shape[1]),
                recall_at_1=float((rank < 1).float().mean()), recall_at_5=float((rank < 5).float().mean()),
-               recall_at_10=float((rank < 10).float().mean()), median_rank=float(rank.float().median()) + 1,
+               recall_at_10=float((rank < 10).float().mean()),
+               recall_at_1_optimistic=float((rank_lo < 1).float().mean()),
+               median_rank=float(torch.quantile(rank, 0.5)) + 1, ties_at_top=int((rank_hi != rank_lo).sum()),
                mean_own_sim=float(target.mean()), seed=a.seed)
     print(json.dumps(res, indent=1))
     if a.out:

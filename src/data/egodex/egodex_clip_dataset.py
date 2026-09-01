@@ -145,9 +145,11 @@ class EgoDexClipDataset(AnnotatedDataset):
         # on the first such clip -- 2026-09-01, after 315 steps x 1,024 clips of clean data.
         fin = np.isfinite(coord).all(1) & np.isfinite(color).all(1)
         if not fin.all():
-            self._skip(f"{part}/{stem}#{clip}: {int((~fin).sum())} non-finite points dropped")
+            log.warning(f"[{self.LOG_POSTFIX}] {part}/{stem}#{clip}: {int((~fin).sum())} non-finite points dropped")
             coord, color = coord[fin], color[fin]
             c = c.__class__(**{**c.__dict__, "coord": c.coord[fin], "segment": c.segment[fin]})
+            if coord.shape[0] < self.min_clip_points:
+                return None
         keep = np.arange(coord.shape[0], dtype=np.int64)
         if self.max_clip_points and coord.shape[0] > self.max_clip_points:
             keep = np.sort(np.random.choice(coord.shape[0], self.max_clip_points, replace=False))
