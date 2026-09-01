@@ -25,9 +25,13 @@
 #
 # THE LEARNING RATE.  caption_loss reduction=weighted_sum is (loss*n_pts).sum()/n_pts.sum(): a weighted
 # MEAN over captions, so the gradient does not grow with the batch and the linear scaling rule applies
-# (SGD, Goyal et al.).  The 1-GPU anchor was lr 5e-3 at ~1,193 unique captions/step; at ~6,100 the
-# same rule gives 5e-3 x 5.11 = 0.0256, rounded down to 0.025.  Half the released 0.05 peak.  OneCycle
-# over 3,750 steps, pct_start 0.1 = 375 warmup.
+# (SGD, Goyal et al.).  The 1-GPU anchor was lr 5e-3 at ~1,193 unique captions/step.  The linear rule
+# gave 0.025 for ~6,100 -- and DIVERGED: run dger9lqn/qznr (2026-09-01) trained cleanly while the
+# warmup passed 0.009-0.020 (loss 8.63 -> 4.76 by step 315), then after the 0.025 peak the loss went
+# 5.25 (step 523) -> 9.79 (step ~680, above the ln(6,100)=8.7 chance level) while egodex_test
+# retrieval fell from recall@1 0.02768 (step 450) to 0.01014 (step 600).  So the peak is set by the
+# square-root rule instead, 5e-3 x sqrt(5.11) = 0.0113 -> 0.01, inside the range that trained.
+# OneCycle over 3,750 steps, pct_start 0.1 = 375 warmup.
 #
 # OneCycle anneals to zero at max_steps, so max_steps is fixed at launch and cannot be extended
 # afterwards without changing the schedule the run was trained under.
@@ -37,8 +41,8 @@
 #
 # What changes from the released recipe (SGD 0.05 nesterov, wd 1e-4, OneCycle pct_start 0.05
 # div 10 final_div 1e4, 4 scenes/GPU x 8 A100, 57,600 steps, 16-mixed, no clip, no EMA):
-#   lr 0.05 -> 0.025       one tenth at the released ~1,200-caption pool, then x5.11 for the 4-rank
-#                          1,024-clip pool by the linear rule (see above).
+#   lr 0.05 -> 0.01        one tenth at the released ~1,200-caption pool, then x sqrt(5.11) for the
+#                          4-rank 1,024-clip pool; the linear rule's 0.025 diverged (see above).
 #   pct_start 0.05 -> 0.1  longer warmup, same reason.
 #   final_div 1e4 -> 1e3   same 5e-6 floor from a 10x lower peak.
 #   57,600 -> 3,750        post-training, not retraining; 3.84M samples, see the budget note above.
@@ -82,7 +86,7 @@ trainer:
 
 model:
   optimizer:
-    lr: 0.025
+    lr: 0.01
   scheduler:
     pct_start: 0.1
     final_div_factor: 1000.0
