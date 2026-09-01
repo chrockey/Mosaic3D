@@ -17,25 +17,35 @@
 # 3,104 episodes are in egodex_val.txt and appear in neither.  The same set is recorded with a
 # sha256 by PointWAM tools/build_human_demo_manifest.py.
 #
-# THE STEP BUDGET.  One epoch is 320,876 samples = 1,671 steps at batch 192, and a sample is
-# (episode, a clip drawn at random), so an epoch sees one clip per episode and E epochs see ~E
-# distinct clips of each.  20,000 steps = 11.97 epochs, i.e. about twelve clips per episode, which
-# sits between the median (10) and the mean (15.18).  That is 3.84M samples, 3.8x the ARKitScenes
-# post-train's 1.02M -- a bigger budget for a bigger shift.
+# THE STEP BUDGET.  4 ranks x 224 = 896 samples/step.  A sample is (episode, a clip drawn at random),
+# so an epoch (320,876 samples) sees one clip per episode.  The budget is held at the SAME sample
+# exposure the 1-GPU plan had -- 3.84M samples = 11.97 epochs = ~12 clips/episode (median clips/episode
+# is 10, mean 15.18), 3.8x the ARKitScenes plan's 1.02M -- which at 896/step is 4,300 steps.
+# (train-budget-by-sample-exposure: a batch change rescales steps, it does not change the budget.)
+#
+# THE LEARNING RATE.  caption_loss reduction=weighted_sum is (loss*n_pts).sum()/n_pts.sum(): a weighted
+# MEAN over captions, so the gradient does not grow with the batch and the linear scaling rule applies
+# (SGD, Goyal et al.).  The 1-GPU anchor was lr 5e-3 at ~1,193 unique captions/step; at ~5,370 the
+# same rule gives 5e-3 x 4.5 = 0.0225, rounded DOWN to 0.02 because this is post-training a converged
+# encoder.  Still below the released 0.05 peak.  OneCycle over 4,300 steps, pct_start 0.1 = 430 warmup.
 #
 # OneCycle anneals to zero at max_steps, so max_steps is fixed at launch and cannot be extended
 # afterwards without changing the schedule the run was trained under.
 #
+# ONE-GPU VARIANT (the earlier plan, still valid): trainer.devices=1 data.batch_size=192
+# model.optimizer.lr=5e-3 trainer.max_steps=20000 callbacks.model_checkpoint.every_n_train_steps=1000.
+#
 # What changes from the released recipe (SGD 0.05 nesterov, wd 1e-4, OneCycle pct_start 0.05
 # div 10 final_div 1e4, 4 scenes/GPU x 8 A100, 57,600 steps, 16-mixed, no clip, no EMA):
-#   lr 0.05 -> 0.005       one tenth: the encoder is converged, only its input moved.
+#   lr 0.05 -> 0.02        one tenth at the released ~1,200-caption pool, then x4.5 for the 4-rank
+#                          pool by the linear rule (see above).
 #   pct_start 0.05 -> 0.1  longer warmup, same reason.
 #   final_div 1e4 -> 1e3   same 5e-6 floor from a 10x lower peak.
-#   57,600 -> 20,000       post-training, not retraining; see the budget note above.
+#   57,600 -> 4,300        post-training, not retraining; 3.84M samples, see the budget note above.
 #   grad clip none -> 1.0  cheap insurance while the distribution shifts.
-#   batch 4 -> 192         the loss's denominator is the batch's unique captions; see data/egodex.
+#   batch 4 -> 224 x 4     the loss's denominator is the GLOBAL batch's unique captions; see data/egodex.
 #   logit_scale frozen, caption negatives gathered across ranks -- model/loss/caption_egocentric.
-#   validation             REMOVED from the loop; a snapshot every 1,000 steps instead.
+#   validation             REMOVED from the loop; a snapshot every 200 steps instead (21 candidates).
 #
 # HOW A SNAPSHOT IS CHOSEN.  Two cheap signals in different domains, so neither leaks into the
 # other, and closed-loop SR is spent only on the one they pick:
@@ -59,20 +69,20 @@ defaults:
 seed: 12345
 
 trainer:
-  max_steps: 20000
+  max_steps: 4300
   max_epochs: -1
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 1.0
   # BatchNorm statistics are the first thing a distribution shift breaks, and this shift is the
   # largest of the three tried: the released stats come from ~150k-point reconstructions, an
-  # EgoDex clip is 6,622 points.  At batch 192 each step re-estimates them from 1.29M points.
-  # No-op at one rank; it matters if this ever runs on more.
+  # EgoDex clip is 6,622 points.  At 224 x 4 each step sees 5.9M points.
+  # Four ranks here, so it re-estimates them from the 896-clip global batch.
   sync_batchnorm: True
 
 model:
   optimizer:
-    lr: 5e-3
+    lr: 0.02
   scheduler:
     pct_start: 0.1
     final_div_factor: 1000.0
@@ -82,12 +92,12 @@ test: False
 
 callbacks:
   # Nothing is monitored in-loop, so save unconditionally and keep every snapshot: with no
-  # validation curve the only way to choose is to evaluate them afterwards.  Every 1,000 steps
-  # over 20,000 gives 20 candidates, which is the resolution the two signals above can afford.
+  # validation curve the only way to choose is to evaluate them afterwards.  Every 200 steps over
+  # 4,300 gives 21 candidates, which is the resolution the two signals above can afford.
   model_checkpoint:
     monitor: null
     save_top_k: -1
-    every_n_train_steps: 1000
+    every_n_train_steps: 200
     save_last: True
     filename: "step_{step:06d}"
 
