@@ -17,17 +17,17 @@
 # 3,104 episodes are in egodex_val.txt and appear in neither.  The same set is recorded with a
 # sha256 by PointWAM tools/build_human_demo_manifest.py.
 #
-# THE STEP BUDGET.  4 ranks x 224 = 896 samples/step.  A sample is (episode, a clip drawn at random),
+# THE STEP BUDGET.  4 ranks x 192 = 768 samples/step.  A sample is (episode, a clip drawn at random),
 # so an epoch (320,876 samples) sees one clip per episode.  The budget is held at the SAME sample
 # exposure the 1-GPU plan had -- 3.84M samples = 11.97 epochs = ~12 clips/episode (median clips/episode
-# is 10, mean 15.18), 3.8x the ARKitScenes plan's 1.02M -- which at 896/step is 4,300 steps.
+# is 10, mean 15.18), 3.8x the ARKitScenes plan's 1.02M -- which at 768/step is 5,000 steps.
 # (train-budget-by-sample-exposure: a batch change rescales steps, it does not change the budget.)
 #
 # THE LEARNING RATE.  caption_loss reduction=weighted_sum is (loss*n_pts).sum()/n_pts.sum(): a weighted
 # MEAN over captions, so the gradient does not grow with the batch and the linear scaling rule applies
-# (SGD, Goyal et al.).  The 1-GPU anchor was lr 5e-3 at ~1,193 unique captions/step; at ~5,370 the
-# same rule gives 5e-3 x 4.5 = 0.0225, rounded DOWN to 0.02 because this is post-training a converged
-# encoder.  Still below the released 0.05 peak.  OneCycle over 4,300 steps, pct_start 0.1 = 430 warmup.
+# (SGD, Goyal et al.).  The 1-GPU anchor was lr 5e-3 at ~1,193 unique captions/step; at ~4,630 the
+# same rule gives 5e-3 x 3.88 = 0.0194, i.e. 0.02.  Still below the released 0.05 peak.  OneCycle over
+# 5,000 steps, pct_start 0.1 = 500 warmup.
 #
 # OneCycle anneals to zero at max_steps, so max_steps is fixed at launch and cannot be extended
 # afterwards without changing the schedule the run was trained under.
@@ -38,14 +38,14 @@
 # What changes from the released recipe (SGD 0.05 nesterov, wd 1e-4, OneCycle pct_start 0.05
 # div 10 final_div 1e4, 4 scenes/GPU x 8 A100, 57,600 steps, 16-mixed, no clip, no EMA):
 #   lr 0.05 -> 0.02        one tenth at the released ~1,200-caption pool, then x4.5 for the 4-rank
-#                          pool by the linear rule (see above).
+#                          pool by the linear rule (see above); x3.88 at 192x4, same rounding.
 #   pct_start 0.05 -> 0.1  longer warmup, same reason.
 #   final_div 1e4 -> 1e3   same 5e-6 floor from a 10x lower peak.
-#   57,600 -> 4,300        post-training, not retraining; 3.84M samples, see the budget note above.
+#   57,600 -> 5,000        post-training, not retraining; 3.84M samples, see the budget note above.
 #   grad clip none -> 1.0  cheap insurance while the distribution shifts.
-#   batch 4 -> 224 x 4     the loss's denominator is the GLOBAL batch's unique captions; see data/egodex.
+#   batch 4 -> 192 x 4     the loss's denominator is the GLOBAL batch's unique captions; see data/egodex.
 #   logit_scale frozen, caption negatives gathered across ranks -- model/loss/caption_egocentric.
-#   validation             REMOVED from the loop; a snapshot every 200 steps instead (21 candidates).
+#   validation             REMOVED from the loop; a snapshot every 200 steps instead (25 candidates).
 #
 # HOW A SNAPSHOT IS CHOSEN.  Two cheap signals in different domains, so neither leaks into the
 # other, and closed-loop SR is spent only on the one they pick:
@@ -69,15 +69,15 @@ defaults:
 seed: 12345
 
 trainer:
-  max_steps: 4300
+  max_steps: 5000
   max_epochs: -1
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 1.0
   # BatchNorm statistics are the first thing a distribution shift breaks, and this shift is the
   # largest of the three tried: the released stats come from ~150k-point reconstructions, an
-  # EgoDex clip is 6,622 points.  At 224 x 4 each step sees 5.9M points.
-  # Four ranks here, so it re-estimates them from the 896-clip global batch.
+  # EgoDex clip is 6,622 points.  At 192 x 4 each step sees 5.1M points.
+  # Four ranks here, so it re-estimates them from the 768-clip global batch.
   sync_batchnorm: True
 
 model:
@@ -93,7 +93,7 @@ test: False
 callbacks:
   # Nothing is monitored in-loop, so save unconditionally and keep every snapshot: with no
   # validation curve the only way to choose is to evaluate them afterwards.  Every 200 steps over
-  # 4,300 gives 21 candidates, which is the resolution the two signals above can afford.
+  # 5,000 gives 25 candidates, which is the resolution the two signals above can afford.
   model_checkpoint:
     monitor: null
     save_top_k: -1
