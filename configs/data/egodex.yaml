@@ -1,0 +1,140 @@
+# EgoDex human demonstrations as egocentric CLIPS, for post-training the released encoder.
+# Diffs from configs/data/ark_frame.yaml, all measured (2026-09-01, 420 clips over all 7 parts):
+#
+#   * dataset      EgoDexClipDataset -- one sample = one 11-frame clip of one episode, at the
+#                  clip's first frame.  Episodes hold 15.18 clips on average (med 10, max 137),
+#                  so 320,876 train episodes are ~4.87M clips: 2.7x the released pretraining
+#                  exposure in a single epoch.
+#   * condition    ARKitScenes, NOT a new row.  `conditions` sizes net.embedding_table (PPT's
+#                  condition embedding) and the released spunet101.ckpt carries exactly 3 rows;
+#                  a 4th is a load_state_dict shape mismatch before step 0.  ARKitScenes is the
+#                  right one of the three to borrow: it is the egocentric consumer-depth domain.
+#   * batch_size   160, not 64.  This loss's softmax denominator is the batch's UNIQUE captions,
+#                  and EgoDex carries 10.05 captions/clip at a 20% in-batch duplication rate that
+#                  is flat in batch size, so unique captions are near-linear in it:
+#                      B      32    64    96   128   160   192   256   320
+#                      uniq  271   526   786  1045  1294  1547  2055  2551
+#                  The released recipe's pool is ~1200, reached at B=148; 160 is the round number
+#                  just above it.  Memory is not what binds -- 160 x 6,622 pts = 1.06M points per
+#                  step against ARKit's 1.79M, on a GPU with 2.3x the memory.
+#   * num_workers  16, not 8.  Every sample costs two h5 opens on GPFS (the maskcap file and the
+#                  flow file); at B=160 that is ~320 opens per step, and this is the bottleneck,
+#                  not compute.  One rank here, so the whole worker budget goes to it.
+#   * CenterShift(apply_z=false)  kept, for the OPPOSITE reason to ARKit's.  These clouds are in a
+#                  world frame whose floor is y=0 (the dataset then rotates +y up onto +z up), so
+#                  absolute height is already comparable across episodes and must not be re-set.
+#   * SphereCrop   absent, as for ARKit: point_max never triggers at 6.6k points/clip.
+#   * num_masks    unset.  10.05 captions/clip is the supervision, not something to subsample.
+#
+# Everything else (rotation, scale, flip, jitter, elastic, chromatic, colour normalisation,
+# 2 cm grid, FilterCaption) is byte-identical to the released recipe.
+
+_target_: src.data.datamodule.MultiDataModule
+
+train_dataset:
+  _target_: src.data.multi_dataloader.ConcatDataset
+  _partial_: true
+  ignore_label: -100
+  conditions: ["ScanNet", "ARKitScenes", "ScanNetPP"]
+  repeat: 1
+  datasets:
+    - _target_: src.data.egodex.egodex_clip_dataset.EgoDexClipDataset
+      _partial_: true
+      # stem must be "egodex" so BaseDataset reads egodex_train.txt; the path is a symlink to
+      # datasets/human-demos, which is where maskcap/ and flows/ actually live.
+      data_dir: /datasets/mosaic3d-posttrain/egodex
+      split: train
+      ignore_label: -100
+      repeat: 1
+      num_masks: null
+      min_mask_points: 32      # a caption whose object is 32 points is supervision noise
+      min_clip_points: 1000    # p05 of points/clip is well above this; it catches truncated files
+      max_clip_points: null    # max measured is 12,000; nothing to cap
+      require_visible: true    # a point the camera cannot see has no colour worth aligning text to
+      transforms:
+        - type: FilterCaption
+          min_words: 1
+          max_words: 50        # captions run 30.8 words mean, 41.6 p95 -- inside CLIP's 77 tokens
+          min_letter_ratio: 0.5
+          max_repetition_ratio: 0.4
+          max_consecutive: 3
+        - type: Copy
+          keys_dict:
+            coord: origin_coord
+        - type: RandomRotate
+          p: 0.5
+          angle: [-1, 1]
+          center: [0, 0, 0]
+          axis: "z"            # correct because the dataset already put gravity on +z
+        - type: RandomRotate
+          p: 0.5
+          angle: [-0.015625, 0.015625]
+          axis: "x"
+        - type: RandomRotate
+          p: 0.5
+          angle: [-0.015625, 0.015625]
+          axis: "y"
+        - type: RandomScale
+          scale: [0.9, 1.1]
+        - type: RandomFlip
+          p: 0.5
+        - type: RandomJitter
+          sigma: 0.005
+          clip: 0.02
+        - type: ElasticDistortion
+        - type: ChromaticAutoContrast
+          p: 0.2
+        - type: ChromaticTranslation
+          p: 0.95
+          ratio: 0.05
+        - type: ChromaticJitter
+          p: 0.95
+          std: 0.05
+        - type: CenterShift
+          apply_z: false
+        - type: NormalizeColor
+        - type: Add
+          keys_dict:
+            condition: ARKitScenes
+        - type: ToTensor
+        - type: Collect
+          keys:
+            [
+              "origin_coord",
+              "coord",
+              "color",
+              "segment",
+              "instance",
+              "binary",
+              "caption_data",
+              "origin_idx",
+              "condition",
+            ]
+          offset_keys_dict:
+            offset: coord
+            pc_count: origin_coord
+          feat_keys: ["color"]
+
+# No in-loop validation, same landmine as ark_frame: DataModule.setup builds val_datasets
+# unconditionally (src/data/datamodule.py:37-38) regardless of limit_val_batches, and BaseDataset
+# asserts its data_dir exists.
+#
+# The held-out set is NOT unused, though -- it is evaluated per snapshot, offline:
+# egodex_test is a separate upstream part, 3,104 episodes, listed in egodex_val.txt and never in
+# egodex_train.txt.  A val CAPTION LOSS would answer the wrong question ("does it caption human
+# demos better"), so the two signals that steer checkpoint choice are instead
+#   (a) the DexJoCo hammer_nail per-point probe -- the defect being fixed, R2 from 0.0688
+#   (b) caption retrieval on egodex_test -- the language alignment being protected
+# and closed-loop SR is spent only on the snapshot those two pick.
+val_datasets: []
+
+collate_fn:
+  _target_: src.data.utils.collate.point_collate_fn_with_masks
+  _partial_: true
+  grid_size: 0.02
+
+batch_size: 160
+num_workers: 16
+in_channel: 3
+
+checkpoint_monitor: "val_scannet200/miou"
