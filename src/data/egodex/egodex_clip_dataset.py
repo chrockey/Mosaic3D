@@ -85,6 +85,7 @@ class EgoDexClipDataset(AnnotatedDataset):
         min_clip_points: int = 1000,
         max_clip_points: Optional[int] = None,
         require_visible: bool = True,
+        with_captions: bool = False,
     ):
         super().__init__(
             data_dir=data_dir,
@@ -99,6 +100,10 @@ class EgoDexClipDataset(AnnotatedDataset):
         self.min_clip_points = min_clip_points
         self.max_clip_points = max_clip_points
         self.require_visible = require_visible
+        # Training always builds caption_data; validation does not (the loss is not run there). The
+        # retrieval evaluation (tools/egocentric/eval_egodex_retrieval.py) needs captions on the held-out
+        # split, so it sets this.
+        self.with_captions = with_captions
         # scene_names are "<part>/<stem>" lines from the split file, itself written from the
         # manifest (PointWAM tools/build_human_demo_manifest.py) so "what did we train on" stays
         # answerable after the fact.
@@ -145,7 +150,7 @@ class EgoDexClipDataset(AnnotatedDataset):
             origin_idx=keep,
         )
 
-        if self.is_train:
+        if self.is_train or self.with_captions:
             seg = c.segment[keep]
             keep_idx, keep_cap = [], []
             for s, cap in enumerate(c.captions):
@@ -167,7 +172,7 @@ class EgoDexClipDataset(AnnotatedDataset):
         # FilterCaption runs inside the transforms and can reject every caption that survived the
         # guard above; an empty list reaches torch.cat([]) in the collate and kills the worker,
         # which then hangs every other rank.
-        if self.is_train and not data["caption_data"]["idx"]:
+        if (self.is_train or self.with_captions) and not data["caption_data"]["idx"]:
             return None
         return data
 
