@@ -49,14 +49,22 @@ class DataModule(LightningDataModule):
         num_batches = len(self.data_train) // (self.hparams.batch_size * world_size)
         log.info(f"num_data: {num_data}, num_batches: {num_batches}")
         if isinstance(self.data_train, Dataset):
+            nw = int(self.hparams.num_workers)
             return DataLoader(
                 dataset=self.data_train,
                 batch_size=self.hparams.batch_size,
-                num_workers=self.hparams.num_workers,
+                num_workers=nw,
                 pin_memory=self.hparams.pin_memory,
                 shuffle=True,
                 drop_last=True,
                 collate_fn=self.hparams.collate_fn,
+                # Workers start from a clean forkserver, not a fork of the trainer process: two of five
+                # EgoDex launches on 2026-09-01 hung at step 0 with one rank in futex_wait (its first
+                # batch never arrived) and the other three spinning in NCCL -- the signature of a
+                # forked worker inheriting a held lock (HDF5, tokenizers, CUDA/NCCL threads).
+                # persistent_workers keeps the pool across epochs instead of re-forking at every boundary.
+                multiprocessing_context=("forkserver" if nw > 0 else None),
+                persistent_workers=nw > 0,
             )
 
     def val_dataloader(self) -> List[DataLoader[Any]]:
