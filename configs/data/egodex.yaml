@@ -9,8 +9,11 @@
 #                  condition embedding) and the released spunet101.ckpt carries exactly 3 rows;
 #                  a 4th is a load_state_dict shape mismatch before step 0.  ARKitScenes is the
 #                  right one of the three to borrow: it is the egocentric consumer-depth domain.
-#   * batch_size   256 PER RANK, x4 ranks = 1,024 per step (user decision 2026-09-01, made with the
-#                  memory numbers in hand: "256 * 4 로 하자").  The largest batch one B200 holds.  This loss's softmax denominator is
+#   * batch_size   224 PER RANK, x4 ranks = 896 per step.  256 was the user's pick with a FROZEN
+#                  temperature (154 GB/rank measured); learning the temperature costs one more
+#                  (masked points x gathered unique captions) tensor kept for backward -- ~1.5M x ~6,100,
+#                  18-36 GB -- and 256/rank hit 180-182 GB and OOMed at step ~208 (run 3, 2026-09-01).
+#                  224 x (824 MiB + the extra) is ~156 GB, under the measured 171 GB death point.  This loss's softmax denominator is
 #                  the batch's UNIQUE captions, gathered across ranks (gather_text), so what matters is
 #                  the GLOBAL pool.  Measured over 480 clips, counting only captions that survive
 #                  min_mask_points=32 below (7.64 per clip) at a flat ~19-21% in-batch duplication:
@@ -139,7 +142,7 @@ collate_fn:
   _partial_: true
   grid_size: 0.02
 
-batch_size: 256
+batch_size: 224
 num_workers: 16
 in_channel: 3
 

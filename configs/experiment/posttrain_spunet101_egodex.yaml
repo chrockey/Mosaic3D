@@ -17,10 +17,10 @@
 # 3,104 episodes are in egodex_val.txt and appear in neither.  The same set is recorded with a
 # sha256 by PointWAM tools/build_human_demo_manifest.py.
 #
-# THE STEP BUDGET.  4 ranks x 256 = 1,024 samples/step.  A sample is (episode, a clip drawn at random),
+# THE STEP BUDGET.  4 ranks x 224 = 896 samples/step.  A sample is (episode, a clip drawn at random),
 # so an epoch (320,876 samples) sees one clip per episode.  The budget is held at the SAME sample
 # exposure the 1-GPU plan had -- 3.84M samples = 11.97 epochs = ~12 clips/episode (median clips/episode
-# is 10, mean 15.18), 3.8x the ARKitScenes plan's 1.02M -- which at 1,024/step is 3,750 steps.
+# is 10, mean 15.18), 3.8x the ARKitScenes plan's 1.02M -- which at 896/step is 4,300 steps.
 # (train-budget-by-sample-exposure: a batch change rescales steps, it does not change the budget.)
 #
 # THE LEARNING RATE.  caption_loss reduction=weighted_sum is (loss*n_pts).sum()/n_pts.sum(): a weighted
@@ -30,8 +30,8 @@
 # warmup passed 0.009-0.020 (loss 8.63 -> 4.76 by step 315), then after the 0.025 peak the loss went
 # 5.25 (step 523) -> 9.79 (step ~680, above the ln(6,100)=8.7 chance level) while egodex_test
 # retrieval fell from recall@1 0.02768 (step 450) to 0.01014 (step 600).  So the peak is set by the
-# square-root rule instead, 5e-3 x sqrt(5.11) = 0.0113 -> 0.01, inside the range that trained.
-# OneCycle over 3,750 steps, pct_start 0.1 = 375 warmup.
+# square-root rule instead, 5e-3 x sqrt(4.5) = 0.0106 -> 0.01, inside the range that trained.
+# OneCycle over 4,300 steps, pct_start 0.1 = 430 warmup.
 #
 # OneCycle anneals to zero at max_steps, so max_steps is fixed at launch and cannot be extended
 # afterwards without changing the schedule the run was trained under.
@@ -45,11 +45,11 @@
 #                          4-rank 1,024-clip pool; the linear rule's 0.025 diverged (see above).
 #   pct_start 0.05 -> 0.1  longer warmup, same reason.
 #   final_div 1e4 -> 1e3   same 5e-6 floor from a 10x lower peak.
-#   57,600 -> 3,750        post-training, not retraining; 3.84M samples, see the budget note above.
+#   57,600 -> 4,300        post-training, not retraining; 3.84M samples, see the budget note above.
 #   grad clip none -> 1.0  cheap insurance while the distribution shifts.
-#   batch 4 -> 256 x 4     the loss's denominator is the GLOBAL batch's unique captions; see data/egodex.
+#   batch 4 -> 224 x 4     the loss's denominator is the GLOBAL batch's unique captions; see data/egodex.
 #   logit_scale frozen, caption negatives gathered across ranks -- model/loss/caption_egocentric.
-#   validation             REMOVED from the loop; a snapshot every 150 steps instead (25 candidates).
+#   validation             REMOVED from the loop; a snapshot every 150 steps instead (28 candidates).
 #
 # HOW A SNAPSHOT IS CHOSEN.  Two cheap signals in different domains, so neither leaks into the
 # other, and closed-loop SR is spent only on the one they pick:
@@ -73,15 +73,15 @@ defaults:
 seed: 12345
 
 trainer:
-  max_steps: 3750
+  max_steps: 4300
   max_epochs: -1
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 1.0
   # BatchNorm statistics are the first thing a distribution shift breaks, and this shift is the
   # largest of the three tried: the released stats come from ~150k-point reconstructions, an
-  # EgoDex clip is 6,622 points.  At 256 x 4 each step sees 6.8M points.
-  # Four ranks here, so it re-estimates them from the 1,024-clip global batch.
+  # EgoDex clip is 6,622 points.  At 224 x 4 each step sees 5.9M points.
+  # Four ranks here, so it re-estimates them from the 896-clip global batch.
   sync_batchnorm: True
 
 model:
@@ -97,7 +97,7 @@ test: False
 callbacks:
   # Nothing is monitored in-loop, so save unconditionally and keep every snapshot: with no
   # validation curve the only way to choose is to evaluate them afterwards.  Every 150 steps over
-  # 3,750 gives 25 candidates, which is the resolution the two signals above can afford.
+  # 4,300 gives 28 candidates, which is the resolution the two signals above can afford.
   model_checkpoint:
     monitor: null
     save_top_k: -1
