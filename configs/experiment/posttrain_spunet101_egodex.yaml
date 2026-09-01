@@ -17,11 +17,11 @@
 # 3,104 episodes are in egodex_val.txt and appear in neither.  The same set is recorded with a
 # sha256 by PointWAM tools/build_human_demo_manifest.py.
 #
-# THE STEP BUDGET.  One epoch is 320,876 samples = 2,005 steps at batch 160, and a sample is
+# THE STEP BUDGET.  One epoch is 320,876 samples = 1,671 steps at batch 192, and a sample is
 # (episode, a clip drawn at random), so an epoch sees one clip per episode and E epochs see ~E
-# distinct clips of each.  20,000 steps = 9.98 epochs, i.e. about ten clips per episode, which is
-# exactly the median clips-per-episode (10; mean 15.18).  That is 3.2M samples, 3.1x the
-# ARKitScenes post-train's 1.02M -- a bigger budget for a bigger shift.
+# distinct clips of each.  20,000 steps = 11.97 epochs, i.e. about twelve clips per episode, which
+# sits between the median (10) and the mean (15.18).  That is 3.84M samples, 3.8x the ARKitScenes
+# post-train's 1.02M -- a bigger budget for a bigger shift.
 #
 # OneCycle anneals to zero at max_steps, so max_steps is fixed at launch and cannot be extended
 # afterwards without changing the schedule the run was trained under.
@@ -33,7 +33,7 @@
 #   final_div 1e4 -> 1e3   same 5e-6 floor from a 10x lower peak.
 #   57,600 -> 20,000       post-training, not retraining; see the budget note above.
 #   grad clip none -> 1.0  cheap insurance while the distribution shifts.
-#   batch 4 -> 160         the loss's denominator is the batch's unique captions; see data/egodex.
+#   batch 4 -> 192         the loss's denominator is the batch's unique captions; see data/egodex.
 #   logit_scale frozen, caption negatives gathered across ranks -- model/loss/caption_egocentric.
 #   validation             REMOVED from the loop; a snapshot every 1,000 steps instead.
 #
@@ -66,7 +66,7 @@ trainer:
   gradient_clip_val: 1.0
   # BatchNorm statistics are the first thing a distribution shift breaks, and this shift is the
   # largest of the three tried: the released stats come from ~150k-point reconstructions, an
-  # EgoDex clip is 6,622 points.  At batch 160 each step re-estimates them from 1.06M points.
+  # EgoDex clip is 6,622 points.  At batch 192 each step re-estimates them from 1.29M points.
   # No-op at one rank; it matters if this ever runs on more.
   sync_batchnorm: True
 
