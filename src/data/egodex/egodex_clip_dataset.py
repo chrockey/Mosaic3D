@@ -138,6 +138,16 @@ class EgoDexClipDataset(AnnotatedDataset):
 
         coord = c.coord @ _Y_UP_TO_Z_UP.T
         color = c.color.astype(np.float32)
+        # The flow h5 stores coordinates as float16, and an invalid depth pixel can come through as
+        # NaN/inf even when the visibility masks pass it.  A non-finite coordinate becomes a garbage
+        # voxel index inside the backbone, and the failure surfaces as
+        #   IndexKernel.cu "index out of bounds" (device-side assert)
+        # on the first such clip -- 2026-09-01, after 315 steps x 1,024 clips of clean data.
+        fin = np.isfinite(coord).all(1) & np.isfinite(color).all(1)
+        if not fin.all():
+            self._skip(f"{part}/{stem}#{clip}: {int((~fin).sum())} non-finite points dropped")
+            coord, color = coord[fin], color[fin]
+            c = c.__class__(**{**c.__dict__, "coord": c.coord[fin], "segment": c.segment[fin]})
         keep = np.arange(coord.shape[0], dtype=np.int64)
         if self.max_clip_points and coord.shape[0] > self.max_clip_points:
             keep = np.sort(np.random.choice(coord.shape[0], self.max_clip_points, replace=False))
