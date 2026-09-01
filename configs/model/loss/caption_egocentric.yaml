@@ -7,10 +7,15 @@ loss_cfg:
   caption_loss:
     reduction: weighted_sum
     use_logit_scale: true
-    # Pin the learned temperature at the released 5.08385 (exp 161.4, tau 0.0062).
-    # It was calibrated on full-scene batches; a frame contributes ~5 masks
-    # instead of up to 300, and a free temperature will chase that shift.
-    freeze_logit_scale: true
+    # The temperature is LEARNED, as in the released recipe.  It was frozen at the released
+    # 5.08385 (exp 161.4, tau 0.0062) for the ARKitScenes plan; on EgoDex that froze the run
+    # into divergence twice (2026-09-01, lr 0.025 and lr 0.01, both at step ~330-450, both
+    # after the loss had reached ~4.8): human-demo captions are full of near-duplicate
+    # sentences for the same object across clips, exact-string dedup cannot merge them, and at
+    # tau 0.0062 those false negatives hand the model huge contradictory gradients once the
+    # easy separation is learned -- the loss climbs ABOVE the ln(6,100) chance level.  A free
+    # temperature can soften.  Starts from the released value (init_weights_from loads it).
+    freeze_logit_scale: false
     # Share caption embeddings across ranks so the softmax denominator is the
     # global batch.  At 64 frames/GPU x 4 GPUs x ~5.3 masks this restores the
     # ~1200-caption negative pool the released recipe had at 4 scenes/GPU.
