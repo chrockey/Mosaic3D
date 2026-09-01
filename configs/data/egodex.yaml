@@ -9,20 +9,20 @@
 #                  condition embedding) and the released spunet101.ckpt carries exactly 3 rows;
 #                  a 4th is a load_state_dict shape mismatch before step 0.  ARKitScenes is the
 #                  right one of the three to borrow: it is the egocentric consumer-depth domain.
-#   * batch_size   192 PER RANK, x4 ranks = 768 per step (user directive 2026-09-01: 4 GPUs are
-#                  allowed, make the batch larger, multiples of 8; 192x4 chosen over 224x4 for the
-#                  memory headroom -- same lr, same wall-clock, 16% smaller caption pool).  This loss's softmax denominator is
+#   * batch_size   256 PER RANK, x4 ranks = 1,024 per step (user decision 2026-09-01, made with the
+#                  memory numbers in hand: "256 * 4 로 하자").  The largest batch one B200 holds.  This loss's softmax denominator is
 #                  the batch's UNIQUE captions, gathered across ranks (gather_text), so what matters is
 #                  the GLOBAL pool.  Measured over 480 clips, counting only captions that survive
 #                  min_mask_points=32 below (7.64 per clip) at a flat ~19-21% in-batch duplication:
-#                      clips/step   128   160   192   224   256   320   768   896
-#                      uniq caps    807  1005  1193  1394  1585  1976 ~4630 ~5370
-#                  The released recipe's pool is ~1200 (one GPU at 192 lands on it, 1193); 768 is ~3.9x
-#                  that, a harder contrastive task, and the reason lr scales with it (see experiment).
-#                  Memory, measured on one B200 on the real training path: B=128 -> 50,608 MiB,
-#                  B=160 -> 76,990 MiB, i.e. ~824 MiB per clip at the margin; 192 -> ~103 GB, 44%
-#                  headroom (224 -> ~130 GB, 29%); batch-total points vary only +-3% (1 sigma) at
-#                  this size, so the mean is what binds.
+#                      clips/step   128   160   192   224   256   320   768  1024
+#                      uniq caps    807  1005  1193  1394  1585  1976 ~4630 ~6100
+#                  The released recipe's pool is ~1200 (one GPU at 192 lands on it, 1193); 1,024 is
+#                  ~5.1x that, a harder contrastive task, and the reason lr scales with it (experiment).
+#                  Memory, measured on one B200 on the real training path (12-step probe):
+#                      B=128 50,608 MiB | B=160 76,990 | B=256 154,464 | B=384 aborts at 171,282
+#                  so 256 sits 17 GB under the death point.  Batch-total points vary +-2.5% (1 sigma)
+#                  at 256 clips, a 4-sigma batch is +10% = +15 GB; the launcher therefore resumes
+#                  from last.ckpt on a non-zero exit and sets PYTORCH_CUDA_ALLOC_CONF=expandable_segments.
 #   * num_workers  16, not 8.  Every sample costs two h5 opens on GPFS (the maskcap file and the
 #                  flow file); at B=160 that is ~320 opens per step, and this is the bottleneck,
 #                  not compute.  One rank here, so the whole worker budget goes to it.
@@ -139,7 +139,7 @@ collate_fn:
   _partial_: true
   grid_size: 0.02
 
-batch_size: 192
+batch_size: 256
 num_workers: 16
 in_channel: 3
 
