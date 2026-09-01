@@ -96,8 +96,16 @@ class DenseLanguageLitModule(LitModuleBase):
         if self.local_rank == 0:
             log.info(self.net)
 
-        # clip encoder
-        self.clip_encoder = build_clip_model(self.hparams.clip_encoder, device=self.device)
+        # clip encoder -- built on the strategy's ROOT device, not self.device.  configure_model
+        # runs before strategy.setup(), when self.device is still cpu; model_to_device() then skips
+        # clip_encoder because children() below hides it; and torch>=2.0's DistributedDataParallel
+        # checks `module.named_parameters()`, which the parameters() override does not touch.  So a
+        # CPU text tower is a hard error at the DDP wrap, before on_fit_start ever runs:
+        #   ValueError: DistributedDataParallel's input module must be on the same type of
+        #   devices, but input module parameters locate in {'cpu', 'cuda'}.
+        # Hit on the EgoDex batch probe 2026-09-01, five launches out of five.
+        device = self.trainer.strategy.root_device if self._trainer is not None else self.device
+        self.clip_encoder = build_clip_model(self.hparams.clip_encoder, device=device)
 
         # freeze clip encoder
         for params in self.clip_encoder.parameters():
