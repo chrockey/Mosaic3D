@@ -205,10 +205,16 @@ class CaptionLoss(CaptionLossBase):
         reduction: Literal["mean", "weighted_sum"] = "weighted_sum",
         freeze_logit_scale: bool = False,
         gather_text: bool = False,
+        max_logit_scale: Optional[float] = None,
         **kwargs,
     ):
         super().__init__()
         self.normalize = normalize
+        # Cap on the learned log-temperature, applied at use (as CLIP does with ln(100)). Without it the
+        # learned scale runs away: on EgoDex post-training exp(logit_scale) went 146 -> 626 -> 2,419
+        # (run 5, lr 0.004) and 146 -> 836 -> 3,192 (run 4, lr 0.01) over steps 150 -> 1,050 -> 1,350,
+        # and the loss turned up once it passed ~600-800, at the same step for both learning rates.
+        self.max_logit_scale = max_logit_scale
         self.loss_func = nn.NLLLoss(reduction="none")
         assert reduction in ["mean", "weighted_sum"]
         self.reduction = reduction
@@ -284,7 +290,10 @@ class CaptionLoss(CaptionLossBase):
         # Logit
         logits = point_features[rows] @ text_features.T.to(device)
         if self.use_logit_scale:
-            logits = self.logit_scale.exp() * logits
+            ls = self.logit_scale
+            if self.max_logit_scale is not None:
+                ls = ls.clamp(max=float(self.max_logit_scale))
+            logits = ls.exp() * logits
         scores = F.log_softmax(logits, dim=-1)
 
         rep_scores = scores[inverse]

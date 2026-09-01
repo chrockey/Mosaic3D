@@ -16,6 +16,11 @@ loss_cfg:
     # easy separation is learned -- the loss climbs ABOVE the ln(6,100) chance level.  A free
     # temperature can soften.  Starts from the released value (init_weights_from loads it).
     freeze_logit_scale: false
+    # ...but capped at CLIP's ln(100) = 4.60517 (scale 100). Runs 4 and 5 (2026-09-01) showed the free
+    # scale climbing from the released 161 to 2,400-3,200 by step 1,350 and the loss turning up once it
+    # passed ~600-800, at the same step for lr 0.01 and 0.004 -- the runaway temperature, not the lr,
+    # was the divergence. The cap is below the released 161, so the scale will sit at 100.
+    max_logit_scale: 4.60517
     # Share caption embeddings across ranks so the softmax denominator is the
     # global batch.  At 64 frames/GPU x 4 GPUs x ~5.3 masks this restores the
     # ~1200-caption negative pool the released recipe had at 4 scenes/GPU.
