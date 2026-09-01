@@ -96,14 +96,9 @@ class DenseLanguageLitModule(LitModuleBase):
         if self.local_rank == 0:
             log.info(self.net)
 
-        # clip encoder -- built on the strategy's ROOT device, not self.device.  configure_model
-        # runs before strategy.setup(), when self.device is still cpu; model_to_device() then skips
-        # clip_encoder because children() below hides it; and torch>=2.0's DistributedDataParallel
-        # checks `module.named_parameters()`, which the parameters() override does not touch.  So a
-        # CPU text tower is a hard error at the DDP wrap, before on_fit_start ever runs:
-        #   ValueError: DistributedDataParallel's input module must be on the same type of
-        #   devices, but input module parameters locate in {'cpu', 'cuda'}.
-        # Hit on the EgoDex batch probe 2026-09-01, five launches out of five.
+        # clip encoder.  Built on the root device when a trainer is attached; src/train.py:98 calls
+        # this with none (init_weights_from), and then the tower lands on cpu -- setup() below moves
+        # it before the DDP wrap.  Do not rely on this line alone; see the comment in setup().
         device = self.trainer.strategy.root_device if self._trainer is not None else self.device
         self.clip_encoder = build_clip_model(self.hparams.clip_encoder, device=device)
 
@@ -119,6 +114,20 @@ class DenseLanguageLitModule(LitModuleBase):
         super().on_load_checkpoint(checkpoint)
 
     def setup(self, stage: str) -> None:
+        # Put the frozen CLIP text tower on the training device HERE, not in configure_model and
+        # not in on_fit_start.  src/train.py:98 calls configure_model() with no trainer attached
+        # (to load init_weights_from), so the tower is built on cpu; model_to_device() then skips
+        # it because children() hides it from nn.Module._apply; and torch>=2.0's
+        # DistributedDataParallel checks module.named_parameters(), which the parameters()
+        # override does not touch -- so the wrap raises
+        #   ValueError: DistributedDataParallel's input module must be on the same type of
+        #   devices, but input module parameters locate in {'cpu', 'cuda'}.
+        # on_fit_start runs after that wrap.  setup() runs after the trainer is attached and
+        # before strategy.setup(), which is the only window that works for both call orders.
+        # Audited in the pod 2026-09-01: after .cuda(), clip_encoder was the ONLY module with
+        # cpu parameters (caption_loss and net move).
+        if getattr(self, "clip_encoder", None) is not None:
+            self.clip_encoder = self.clip_encoder.to(self.trainer.strategy.root_device)
         val_dataloaders = self.trainer.datamodule.val_dataloader()
         if not isinstance(val_dataloaders, list):
             val_dataloaders = [val_dataloaders]
